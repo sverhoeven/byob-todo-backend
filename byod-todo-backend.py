@@ -7,7 +7,11 @@
 # ///
 # Above is inline script metadata
 # See https://docs.astral.sh/uv/guides/scripts/#declaring-script-dependencies
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Generator
+import json
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,37 +31,52 @@ app.add_middleware(
     allow_methods=["*"],
 )
 
-todos: list[Todo] = []
+
+@contextmanager
+def todos_store(file=Path("todos.json")) -> Generator[list[Todo], None, None]:
+    todos: list[Todo] = []
+    if file.exists():
+        todos = [Todo(**item) for item in json.loads(file.read_text())]
+    yield todos
+    file.write_text(json.dumps([asdict(todo) for todo in todos], indent=2))
 
 
 @app.get("/")
 def get_todos(done: bool | None = None) -> list[Todo]:
-    if done is None:
-        return todos
-    return [todo for todo in todos if todo.done == done]
+    with todos_store() as todos:
+        if done is None:
+            return todos
+        return [todo for todo in todos if todo.done == done]
 
 
 @app.post("/")
 def create_todo(todo: Todo):
-    todos.append(todo)
+    with todos_store() as todos:
+        todos.append(todo)
 
 
-def get_todo(title: str) -> Todo:
-    for todo in todos:
-        if todo.title == title:
-            return todo
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Todo not found")
+@contextmanager
+def get_todo(title: str) -> Generator[Todo, None, None]:
+    with todos_store() as todos:
+        todo = next((todo for todo in todos if todo.title == title), None)
+        if todo is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Todo not found"
+            )
+        else:
+            yield todo
 
 
 @app.delete("/{title}")
 def delete_todo(title: str):
-    todos.remove(get_todo(title))
+    with todos_store() as todos, get_todo(title) as todo:
+        todos.remove(todo)
 
 
 @app.put("/{title}")
 def set_done(title: str, done: bool):
-    todo = get_todo(title)
-    todo.done = done
+    with get_todo(title) as todo:
+        todo.done = done
 
 
 def main() -> None:
@@ -71,12 +90,7 @@ Open TODO frontend at:
 {link}
 (Press CTRL+C to quit)
     """)
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=8000,
-        # , log_level="error"
-    )
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="error")
 
 
 if __name__ == "__main__":
